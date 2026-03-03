@@ -1,7 +1,7 @@
 {
-  "name": "monitoring-server",
+  "name": "nodejs-monitoring",
   "version": "2.0.0",
-  "description": "Remote monitoring via SSH + HTTP health checks",
+  "description": "Remote infrastructure monitoring via SSH + HTTP",
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",

@@ -1,6 +1,6 @@
 module.exports = {
   apps: [{
-    name: 'infrastructure-monitor',
+    name: 'nodejs-monitoring',
     script: './src/app.js',
     instances: 1,
     exec_mode: 'fork',

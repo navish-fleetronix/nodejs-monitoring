@@ -13,7 +13,7 @@ class HealthPoller {
     this.interval = config.checkInterval;
     this.isRunning = false;
     this.timer = null;
-    this.previousNetworkStats = new Map(); // Store previous network readings
+    this.previousNetworkStats = new Map();
   }
 
   start() {
@@ -49,66 +49,45 @@ class HealthPoller {
     let isReachable = false;
 
     try {
-      // 1. Get system metrics via SSH (memory, CPU, disk, network)
       systemMetrics = await remoteMonitor.getSystemMetrics(server);
       isReachable = true;
     } catch (sshError) {
-      logger.log('error', `SSH connection failed for ${server.name}`, { error: sshError.message });
-      isReachable = false;
+      logger.log('error', `SSH failed for ${server.name}`, { error: sshError.message });
     }
 
     try {
-      // 2. Check HTTP health endpoint (application status)
       healthData = await this.checkHealthEndpoint(server);
     } catch (httpError) {
       logger.log('error', `Health check failed for ${server.name}`, { error: httpError.message });
       healthData = { status: 'down', error: httpError.message };
     }
 
-    // 3. Calculate network PPS if ingestion server
     let packetsPerSecond = 0;
     if (server.isIngestion && systemMetrics?.network) {
       const prev = this.previousNetworkStats.get(server.name);
-      packetsPerSecond = remoteMonitor.calculatePPS(
-        systemMetrics.network, 
-        prev, 
-        this.interval
-      );
+      packetsPerSecond = remoteMonitor.calculatePPS(systemMetrics.network, prev, this.interval);
       this.previousNetworkStats.set(server.name, systemMetrics.network);
     }
 
-    // 4. Compile final metrics
     const metrics = {
       timestamp: startTime,
       isReachable,
       status: this.determineStatus(isReachable, healthData, systemMetrics),
       responseTime: Date.now() - startTime,
-      
-      // System metrics from SSH
       memory: systemMetrics?.memory?.percentage,
       memoryDetails: systemMetrics?.memory,
       cpu: systemMetrics?.cpu?.usage || systemMetrics?.cpu?.loadPercentage,
       cpuDetails: systemMetrics?.cpu,
       disk: systemMetrics?.disk?.percentage,
       diskDetails: systemMetrics?.disk,
-      processes: systemMetrics?.processes,
-      
-      // Network metrics
       packetsPerSecond: server.isIngestion ? packetsPerSecond : undefined,
-      
-      // Application health from HTTP
       appStatus: healthData?.status,
-      appMetrics: healthData?.metrics || {},
       appError: healthData?.error
     };
 
-    // 5. Save metrics
     await metricsStorage.saveMetrics(server.name, metrics);
-
-    // 6. Check thresholds and alert
     await this.checkThresholds(server.name, metrics);
 
-    // 7. Memory prediction
     if (metrics.memory !== undefined) {
       const serviceData = await metricsStorage.getServiceMetrics(server.name);
       if (serviceData?.history) {
@@ -120,47 +99,91 @@ class HealthPoller {
       }
     }
 
-    // 8. TCP/Traffic monitoring for ingestion servers
     if (server.isIngestion && metrics.packetsPerSecond !== undefined) {
       const serviceData = await metricsStorage.getServiceMetrics(server.name);
-      await tcpMonitor.checkTraffic(
-        server.name, 
-        serviceData?.trafficHistory || [], 
-        metrics.packetsPerSecond
-      );
+      await tcpMonitor.checkTraffic(server.name, serviceData?.trafficHistory || [], metrics.packetsPerSecond);
     }
 
-    // 9. Alert if server unreachable or app down
     if (!isReachable || healthData?.status === 'down') {
       await telegramAlert.send(
-        `🔥 Server Issue Detected\nServer: ${server.name}\nSSH Reachable: ${isReachable}\nApp Status: ${healthData?.status || 'unknown'}\nError: ${healthData?.error || 'SSH failed'}`,
+        `🔥 Server Issue: ${server.name}\nSSH: ${isReachable ? 'OK' : 'FAIL'}\nApp: ${healthData?.status || 'unknown'}`,
         'critical',
         { server: server.name, isReachable, appStatus: healthData?.status, type: 'server_down' }
       );
     }
   }
 
-  async checkHealthEndpoint(server) {
-    const response = await axios.get(server.healthUrl, {
-      headers: { 
-        'X-API-Key': server.healthApiKey,
-        'Accept': 'application/json'
-      },
-      timeout: 10000,
-      validateStatus: () => true
-    });
-
-    return {
-      status: response.status === 200 && response.data?.status === 'healthy' ? 'healthy' : 'unhealthy',
-      metrics: response.data?.metrics || {},
-      raw: response.data
+    async checkHealthEndpoint(server) {
+    const headers = {
+      'Accept': 'application/json, text/plain, */*',
+      'User-Agent': 'NodeJS-Monitor/2.0'
     };
+    
+    if (server.healthApiKey?.type === 'Bearer') {
+      headers['Authorization'] = `Bearer ${server.healthApiKey.token}`;
+    }
+
+    try {
+      const response = await axios.get(server.healthUrl, {
+        headers,
+        timeout: 10000,
+        validateStatus: () => true
+      });
+
+      let isHealthy = false;
+      
+      // HTTP 200 = base requirement
+      if (response.status === 200) {
+        const data = response.data;
+        
+        if (typeof data === 'object' && data !== null) {
+          // Check multiple possible healthy indicators
+          isHealthy = 
+            // Standard fields
+            data.status === 'healthy' ||
+            data.status === 'up' ||
+            data.status === 'ok' ||
+            data.ok === true ||
+            data.healthy === true ||
+            data.success === true ||
+            data.code === 200 ||
+            data.state === 'running' ||
+            // YOUR CUSTOM FORMAT
+            (data.Message && data.Message.toLowerCase().includes('completed')) ||
+            (data.message && data.message.toLowerCase().includes('completed')) ||
+            (data.Message && data.Message.toLowerCase().includes('ok')) ||
+            (data.message && data.message.toLowerCase().includes('ok')) ||
+            (data.Message && data.Message.toLowerCase().includes('success')) ||
+            (data.message && data.message.toLowerCase().includes('success'));
+        } else if (typeof data === 'string') {
+          isHealthy = 
+            data.toLowerCase().includes('ok') ||
+            data.toLowerCase().includes('healthy') ||
+            data.toLowerCase().includes('completed') ||
+            data.toLowerCase().includes('success');
+        } else {
+          isHealthy = true; // Empty 200 = healthy
+        }
+      }
+
+      return {
+        status: isHealthy ? 'healthy' : 'unhealthy',
+        statusCode: response.status,
+        data: response.data
+      };
+      
+    } catch (error) {
+      return {
+        status: 'down',
+        statusCode: 0,
+        error: error.message
+      };
+    }
   }
 
   determineStatus(isReachable, healthData, systemMetrics) {
     if (!isReachable) return 'down';
     if (healthData?.status === 'down') return 'app_down';
-    if (healthData?.status === 'unhealthy') return 'unhealthy';
     if (systemMetrics?.memory?.percentage > 95) return 'critical';
     return 'healthy';
   }
@@ -175,9 +198,9 @@ class HealthPoller {
     for (const check of checks) {
       if (check.value !== undefined && check.value > check.threshold) {
         await telegramAlert.send(
-          `⚠️ High ${check.label} on ${serverName}\nCurrent: ${check.value.toFixed(1)}% (threshold: ${check.threshold}%)`,
+          `⚠️ High ${check.label} on ${serverName}: ${check.value.toFixed(1)}%`,
           'warning',
-          { server: serverName, metric: check.key, value: check.value, threshold: check.threshold, type: 'threshold_exceeded' }
+          { server: serverName, metric: check.key, value: check.value, threshold: check.threshold }
         );
       }
     }

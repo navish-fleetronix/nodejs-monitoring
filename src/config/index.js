@@ -3,7 +3,6 @@ const path = require('path');
 
 dotenv.config();
 
-// Parse server configurations from env
 function parseServers() {
   const servers = [];
   let index = 1;
@@ -22,6 +21,18 @@ function parseServers() {
         authConfig = { type: 'privateKey', path: auth };
       }
       
+      // Parse health API key - 'none' means no auth required
+      let healthApiConfig = null;
+      if (healthKey && healthKey !== 'none') {
+        if (healthKey.startsWith('Bearer:')) {
+          healthApiConfig = { type: 'Bearer', token: healthKey.replace('Bearer:', '') };
+        } else if (healthKey.startsWith('Basic:')) {
+          healthApiConfig = { type: 'Basic', creds: healthKey.replace('Basic:', '') };
+        } else {
+          healthApiConfig = { type: 'X-API-Key', key: healthKey };
+        }
+      }
+      
       servers.push({
         name,
         host,
@@ -29,7 +40,7 @@ function parseServers() {
         username,
         auth: authConfig,
         healthUrl,
-        healthApiKey: healthKey || '',
+        healthApiKey: healthApiConfig,
         isIngestion: isIngestion === 'true'
       });
     }
@@ -43,12 +54,10 @@ const config = {
   port: parseInt(process.env.PORT) || 3000,
   env: process.env.NODE_ENV || 'development',
   
-  // Intervals
   checkInterval: parseInt(process.env.CHECK_INTERVAL) || 30000,
   alertCooldown: parseInt(process.env.ALERT_COOLDOWN) || 300000,
   maxMetricsAge: parseInt(process.env.MAX_METRICS_AGE) || 7200000,
   
-  // Thresholds
   thresholds: {
     memory: parseInt(process.env.MEMORY_THRESHOLD) || 85,
     cpu: parseInt(process.env.CPU_THRESHOLD) || 80,
@@ -58,19 +67,15 @@ const config = {
     prediction: parseInt(process.env.PREDICTION_THRESHOLD) || 300
   },
   
-  // Security
   apiKey: process.env.MONITOR_API_KEY || 'change-me',
   
-  // Telegram
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN,
     chatId: process.env.TELEGRAM_CHAT_ID
   },
   
-  // Remote Servers
   servers: parseServers(),
   
-  // Paths
   dataDir: path.join(__dirname, '../../data'),
   metricsFile: path.join(__dirname, '../../data/metrics.json'),
   alertsFile: path.join(__dirname, '../../data/alerts.log')

@@ -1,9 +1,11 @@
 const fs = require('fs-extra');
+const path = require('path');
 const config = require('../config');
 
 class MetricsStorage {
   constructor() {
     this.metricsFile = config.metricsFile;
+    this.tempFile = config.metricsFile + '.tmp';
     this.maxAge = config.maxMetricsAge;
     this.ensureFile();
   }
@@ -16,44 +18,50 @@ class MetricsStorage {
   }
 
   async saveMetrics(serverName, metrics) {
-    const data = await fs.readJson(this.metricsFile);
-    const timestamp = Date.now();
-    
-    if (!data.servers[serverName]) {
-      data.servers[serverName] = {
-        history: [],
-        trafficHistory: [],
-        lastAlert: 0
-      };
+    try {
+      // Read current data
+      let data;
+      try {
+        data = await fs.readJson(this.metricsFile);
+      } catch (e) {
+        // If corrupted, start fresh
+        data = { servers: {}, lastUpdated: Date.now() };
+      }
+      
+      const timestamp = Date.now();
+      
+      if (!data.servers[serverName]) {
+        data.servers[serverName] = {
+          history: [],
+          trafficHistory: [],
+          lastAlert: 0
+        };
+      }
+
+      const entry = { timestamp, ...metrics };
+      data.servers[serverName].history.push(entry);
+      data.servers[serverName].lastSeen = timestamp;
+
+      // Keep only last 2 hours
+      const cutoff = timestamp - this.maxAge;
+      data.servers[serverName].history = data.servers[serverName].history.filter(m => m.timestamp > cutoff);
+
+      // Traffic history for ingestion
+      if (metrics.packetsPerSecond !== undefined) {
+        data.servers[serverName].trafficHistory.push({ timestamp, value: metrics.packetsPerSecond });
+        const trafficCutoff = timestamp - 1800000;
+        data.servers[serverName].trafficHistory = data.servers[serverName].trafficHistory.filter(t => t.timestamp > trafficCutoff);
+      }
+
+      data.lastUpdated = timestamp;
+      
+      // Atomic write: write to temp, then rename
+      await fs.writeJson(this.tempFile, data, { spaces: 2 });
+      await fs.move(this.tempFile, this.metricsFile, { overwrite: true });
+      
+    } catch (error) {
+      console.error('Failed to save metrics:', error.message);
     }
-
-    const entry = {
-      timestamp,
-      ...metrics
-    };
-
-    // Remove circular references if any
-    delete entry.memoryDetails?.swap; // Simplify for storage
-    
-    data.servers[serverName].history.push(entry);
-    data.servers[serverName].lastSeen = timestamp;
-
-    // Keep only last 2 hours
-    const cutoff = timestamp - this.maxAge;
-    data.servers[serverName].history = data.servers[serverName].history.filter(m => m.timestamp > cutoff);
-
-    // Traffic history for ingestion servers (30 min window)
-    if (metrics.packetsPerSecond !== undefined) {
-      data.servers[serverName].trafficHistory.push({
-        timestamp,
-        value: metrics.packetsPerSecond
-      });
-      const trafficCutoff = timestamp - 1800000;
-      data.servers[serverName].trafficHistory = data.servers[serverName].trafficHistory.filter(t => t.timestamp > trafficCutoff);
-    }
-
-    data.lastUpdated = timestamp;
-    await fs.writeJson(this.metricsFile, data, { spaces: 2 });
   }
 
   async getMetrics() {

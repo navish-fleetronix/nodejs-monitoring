@@ -1,26 +1,22 @@
 const { NodeSSH } = require('node-ssh');
 const config = require('../config');
-const logger = require('../utils/logger');
 
 class RemoteMonitor {
   constructor() {
-    this.sshConnections = new Map();
+    this.previousNetworkStats = new Map();
   }
 
   async getSystemMetrics(serverConfig) {
     const ssh = new NodeSSH();
     
     try {
-      // Connect via SSH
       await this.connect(ssh, serverConfig);
       
-      // Execute commands to get metrics
-      const [memoryInfo, cpuInfo, diskInfo, networkInfo, processInfo] = await Promise.all([
+      const [memoryInfo, cpuInfo, diskInfo, networkInfo] = await Promise.all([
         this.getMemoryInfo(ssh),
         this.getCPUInfo(ssh),
         this.getDiskInfo(ssh),
-        serverConfig.isIngestion ? this.getNetworkStats(ssh) : Promise.resolve(null),
-        this.getProcessInfo(ssh)
+        serverConfig.isIngestion ? this.getNetworkStats(ssh) : Promise.resolve(null)
       ]);
 
       return {
@@ -28,12 +24,9 @@ class RemoteMonitor {
         cpu: cpuInfo,
         disk: diskInfo,
         network: networkInfo,
-        processes: processInfo,
         timestamp: Date.now()
       };
 
-    } catch (error) {
-      throw new Error(`SSH failed for ${serverConfig.name}: ${error.message}`);
     } finally {
       ssh.dispose();
     }
@@ -57,16 +50,14 @@ class RemoteMonitor {
   }
 
   async getMemoryInfo(ssh) {
-    // Get memory info from /proc/meminfo
     const result = await ssh.execCommand('cat /proc/meminfo');
-    
     const lines = result.stdout.split('\n');
     const memInfo = {};
     
     lines.forEach(line => {
       const match = line.match(/^(\w+):\s+(\d+)/);
       if (match) {
-        memInfo[match[1]] = parseInt(match[2]) * 1024; // Convert KB to bytes
+        memInfo[match[1]] = parseInt(match[2]) * 1024;
       }
     });
 
@@ -74,42 +65,21 @@ class RemoteMonitor {
     const available = memInfo.MemAvailable || memInfo.MemFree || 0;
     const used = total - available;
     
-    // Also get swap info
-    const swapTotal = memInfo.SwapTotal || 0;
-    const swapFree = memInfo.SwapFree || 0;
-    const swapUsed = swapTotal - swapFree;
-
     return {
       total,
       used,
       available,
-      percentage: total > 0 ? parseFloat(((used / total) * 100).toFixed(2)) : 0,
-      swap: {
-        total: swapTotal,
-        used: swapUsed,
-        percentage: swapTotal > 0 ? parseFloat(((swapUsed / swapTotal) * 100).toFixed(2)) : 0
-      }
+      percentage: total > 0 ? parseFloat(((used / total) * 100).toFixed(2)) : 0
     };
   }
 
   async getCPUInfo(ssh) {
-    // Get CPU usage using top (single sample)
     const result = await ssh.execCommand("top -bn1 | grep 'Cpu(s)' | awk '{print $2}' | cut -d'%' -f1");
-    
-    let usage = 0;
-    if (result.stdout) {
-      usage = parseFloat(result.stdout.trim()) || 0;
-    }
+    let usage = parseFloat(result.stdout.trim()) || 0;
 
-    // Alternative: read from /proc/stat for more accuracy
-    const statResult = await ssh.execCommand('cat /proc/stat | head -1');
-    // Parse CPU stats (simplified)
-    
-    // Get load average
     const loadResult = await ssh.execCommand('uptime | awk -F"load average:" \'{print $2}\'');
     const loadAvgs = loadResult.stdout.trim().split(',').map(s => parseFloat(s.trim()) || 0);
 
-    // Get CPU count
     const cpuCountResult = await ssh.execCommand('nproc');
     const cpuCount = parseInt(cpuCountResult.stdout.trim()) || 1;
 
@@ -126,42 +96,76 @@ class RemoteMonitor {
   }
 
   async getDiskInfo(ssh) {
-    // Get disk usage for root partition
-    const result = await ssh.execCommand("df -h / | tail -1 | awk '{print $5}' | sed 's/%//'");
-    
-    let percentage = 0;
-    if (result.stdout) {
-      percentage = parseInt(result.stdout.trim()) || 0;
-    }
+  try {
+    // Get percentage
+    const pctResult = await ssh.execCommand("df -h / | tail -1 | awk '{print $5}' | sed 's/%//'");
+    const percentage = parseInt(pctResult.stdout.trim()) || 0;
 
-    // Get detailed info
-    const detailResult = await ssh.execCommand("df -B1 / | tail -1");
-    const parts = detailResult.stdout.trim().split(/\s+/);
+    // Get full details with mount point
+    const detailResult = await ssh.execCommand("df -h / | tail -1");
+    // Example outputs:
+    // /dev/sda1       50G   30G   20G  60% /
+    // or
+    // Filesystem     Size  Used Avail Use% Mounted on
+    // /dev/sda1       50G   30G   20G  60% /
+    
+    const line = detailResult.stdout.trim();
+    const parts = line.split(/\s+/);
+    
+    // Find mount point (usually last column)
+    let mount = '/';
+    let total = 0, used = 0, available = 0;
+    
+    if (parts.length >= 6) {
+      // Standard format: filesystem size used avail use% mount
+      total = this.parseSize(parts[1]);
+      used = this.parseSize(parts[2]);
+      available = this.parseSize(parts[3]);
+      mount = parts[5] || parts[parts.length - 1] || '/';
+    } else if (parts.length === 1) {
+      // Just filesystem, use defaults
+      mount = '/';
+    }
     
     return {
       percentage,
-      total: parseInt(parts[1]) || 0,
-      used: parseInt(parts[2]) || 0,
-      available: parseInt(parts[3]) || 0,
-      mount: parts[5] || '/'
+      total,
+      used,
+      available,
+      mount  // ← Now properly extracted
     };
+  } catch (error) {
+    logger.log('error', 'Failed to get disk info', { error: error.message });
+    return { percentage: 0, total: 0, used: 0, available: 0, mount: '/' };
   }
+}
+
+// Helper to parse size like "50G", "100M", "1T"
+parseSize(sizeStr) {
+  if (!sizeStr) return 0;
+  const num = parseFloat(sizeStr);
+  const unit = sizeStr.slice(-1).toUpperCase();
+  
+  const multipliers = {
+    'K': 1024,
+    'M': 1024 * 1024,
+    'G': 1024 * 1024 * 1024,
+    'T': 1024 * 1024 * 1024 * 1024
+  };
+  
+  return Math.floor(num * (multipliers[unit] || 1));
+}
 
   async getNetworkStats(ssh) {
-    // Get network interface statistics
-    // Assumes eth0 or finds primary interface
     const ifaceResult = await ssh.execCommand("ip route | grep default | awk '{print $5}' | head -1");
     const iface = ifaceResult.stdout.trim() || 'eth0';
 
-    // Get current stats
     const rxResult = await ssh.execCommand(`cat /sys/class/net/${iface}/statistics/rx_packets`);
     const txResult = await ssh.execCommand(`cat /sys/class/net/${iface}/statistics/tx_packets`);
     
     const rxPackets = parseInt(rxResult.stdout.trim()) || 0;
     const txPackets = parseInt(txResult.stdout.trim()) || 0;
 
-    // Calculate packets per second (requires previous reading)
-    // We'll store raw values and calculate delta in the poller
     return {
       interface: iface,
       rxPackets,
@@ -170,28 +174,10 @@ class RemoteMonitor {
     };
   }
 
-  async getProcessInfo(ssh) {
-    // Get process count and top memory consumers
-    const countResult = await ssh.execCommand('ps aux | wc -l');
-    const processCount = parseInt(countResult.stdout.trim()) - 1 || 0;
-
-    // Get zombie processes
-    const zombieResult = await ssh.execCommand('ps aux | grep -c "\\<Z\\>"');
-    const zombieCount = parseInt(zombieResult.stdout.trim()) || 0;
-
-    return {
-      total: processCount,
-      zombie: zombieCount
-    };
-  }
-
-  // Calculate packets per second from two readings
   calculatePPS(current, previous, intervalMs) {
     if (!previous || !current) return 0;
-    
     const packetDiff = current.totalPackets - previous.totalPackets;
     const seconds = intervalMs / 1000;
-    
     return Math.max(0, Math.round(packetDiff / seconds));
   }
 }
