@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><%= title %></title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <div class="logo-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+                            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+                            <line x1="6" y1="6" x2="6.01" y2="6"></line>
+                            <line x1="6" y1="18" x2="6.01" y2="18"></line>
+                        </svg>
+                    </div>
+                    <div>
+                        <h1>Infrastructure Monitor</h1>
+                        <p class="subtitle">Remote SSH + HTTP Health Monitoring</p>
+                    </div>
+                </div>
+                <div class="status-indicator" id="connectionStatus">
+                    <span class="pulse"></span>
+                    <span>Live</span>
+                </div>
+            </div>
+            <div class="last-update" id="lastUpdate">Initializing...</div>
+        </header>
+
+        <div class="servers-grid" id="serversGrid">
+            <!-- Servers injected here -->
+        </div>
+
+        <div class="charts-section">
+            <div class="chart-container">
+                <div class="chart-header">
+                    <h3>Memory Usage (%)</h3>
+                    <div class="server-selector">
+                        <select id="memoryServerSelect"></select>
+                    </div>
+                </div>
+                <canvas id="memoryChart"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-header">
+                    <h3>CPU Load (%)</h3>
+                    <div class="server-selector">
+                        <select id="cpuServerSelect"></select>
+                    </div>
+                </div>
+                <canvas id="cpuChart"></canvas>
+            </div>
+
+            <div class="chart-container wide">
+                <div class="chart-header">
+                    <h3>Network Traffic (Packets/sec)</h3>
+                    <div class="server-selector">
+                        <select id="trafficServerSelect"></select>
+                    </div>
+                </div>
+                <canvas id="trafficChart"></canvas>
+            </div>
+        </div>
+
+        <div class="details-grid">
+            <div class="detail-card">
+                <h4>Disk Usage</h4>
+                <div id="diskDetails">Select a server</div>
+            </div>
+            <div class="detail-card">
+                <h4>System Info</h4>
+                <div id="systemDetails">Select a server</div>
+            </div>
+        </div>
+
+        <div class="alerts-section">
+            <h3>Recent Alerts</h3>
+            <div class="alerts-list" id="alertsList"></div>
+        </div>
+    </div>
+
+    <script>
+        const SERVERS = <%- JSON.stringify(servers) %>;
+        const REFRESH_INTERVAL = <%= refreshInterval %>;
+    </script>
+    <script src="/js/charts.js"></script>
+</body>
+</html>
